@@ -1,8 +1,23 @@
+use clap::Parser;
 use std::future::Future;
 use std::io::{self, Write};
 use std::pin::Pin;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
+
+#[derive(Parser)]
+#[command(name = "jedis-cli")]
+#[command(about = "CLI client for jedis server")]
+struct Args {
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+
+    #[arg(long, default_value = "6379")]
+    port: u16,
+
+    #[arg(long)]
+    password: Option<String>,
+}
 
 fn main() {
     tokio::runtime::Builder::new_multi_thread()
@@ -13,9 +28,9 @@ fn main() {
 }
 
 async fn run() {
-    let host = std::env::args().nth(1).unwrap_or("127.0.0.1".to_string());
-    let port = std::env::args().nth(2).unwrap_or("6379".to_string());
-    let addr = format!("{}:{}", host, port);
+    dotenvy::dotenv().ok();
+    let args = Args::parse();
+    let addr = format!("{}:{}", args.host, args.port);
 
     let stream = match TcpStream::connect(&addr).await {
         Ok(s) => s,
@@ -30,6 +45,26 @@ async fn run() {
 
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
+
+    // auto-send AUTH if password provided
+    if let Some(ref password) = args.password {
+        let auth_cmd = format_resp(&["AUTH", password]);
+        if writer.write_all(auth_cmd.as_bytes()).await.is_err() {
+            eprintln!("Failed to send AUTH");
+            std::process::exit(1);
+        }
+        match read_response(&mut reader).await {
+            Ok(r) if r.starts_with("ERR") => {
+                eprintln!("Authentication failed: {}", r);
+                std::process::exit(1);
+            }
+            Ok(_) => println!("Authenticated\n"),
+            Err(e) => {
+                eprintln!("Auth error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
 
     loop {
         print!("{}> ", addr);
